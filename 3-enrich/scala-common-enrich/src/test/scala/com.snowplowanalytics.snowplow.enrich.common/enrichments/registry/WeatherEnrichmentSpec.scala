@@ -14,9 +14,9 @@ package com.snowplowanalytics.snowplow.enrich.common.enrichments.registry
 import java.lang.{Float => JFloat}
 
 import com.snowplowanalytics.iglu.client.SchemaKey
+import io.circe.generic.auto._
+import io.circe.literal._
 import org.joda.time.DateTime
-import org.json4s._
-import org.json4s.jackson.JsonMethods.parse
 import org.specs2.Specification
 
 object WeatherEnrichmentSpec {
@@ -40,89 +40,99 @@ class WeatherEnrichmentSpec extends Specification {
 
   lazy val validAppKey = sys.env
     .get(OwmApiKey)
-    .getOrElse(
-      throw new IllegalStateException(s"No ${OwmApiKey} environment variable found, test should have been skipped"))
+    .getOrElse(throw new IllegalStateException(
+      s"No $OwmApiKey environment variable found, test should have been skipped"))
 
   object invalidEvent {
-    var lat: JFloat    = 70.98224f
-    var lon: JFloat    = 70.98224f
+    var lat: JFloat = 70.98224f
+    var lon: JFloat = 70.98224f
     var time: DateTime = null
   }
 
   object validEvent {
-    var lat: JFloat    = 20.713052f
-    var lon: JFloat    = 70.98224f
+    var lat: JFloat = 20.713052f
+    var lon: JFloat = 70.98224f
     var time: DateTime = new DateTime("2018-04-30T23:56:01.003+00:00")
   }
 
   def e1 = {
-    val enr   = WeatherEnrichment("KEY", 5200, 1, "history.openweathermap.org", 10)
-    val stamp = enr.getWeatherContext(Option(invalidEvent.lat), Option(invalidEvent.lon), Option(invalidEvent.time))
+    val enr = WeatherEnrichment("KEY", 5200, 1, "history.openweathermap.org", 10)
+    val stamp = enr.getWeatherContext(
+      Option(invalidEvent.lat),
+      Option(invalidEvent.lon),
+      Option(invalidEvent.time))
     stamp.toEither must beLeft.like { case e => e must contain("tstamp: None") }
   }
 
-  def e2 = WeatherEnrichment("KEY", 0, 1, "history.openweathermap.org", 5) must not(throwA[IllegalArgumentException])
+  def e2 =
+    WeatherEnrichment("KEY", 0, 1, "history.openweathermap.org", 5) must not(
+      throwA[IllegalArgumentException])
 
   def e3 = {
-    val enr   = WeatherEnrichment(validAppKey, 5200, 1, "history.openweathermap.org", 10)
-    val stamp = enr.getWeatherContext(Option(validEvent.lat), Option(validEvent.lon), Option(validEvent.time))
+    val enr = WeatherEnrichment(validAppKey, 5200, 1, "history.openweathermap.org", 10)
+    val stamp =
+      enr.getWeatherContext(Option(validEvent.lat), Option(validEvent.lon), Option(validEvent.time))
     stamp.toEither must beRight
   }
 
   def e4 = {
-    val enr   = WeatherEnrichment("KEY", 5200, 1, "history.openweathermap.org", 10)
-    val stamp = enr.getWeatherContext(Option(validEvent.lat), Option(validEvent.lon), Option(validEvent.time))
+    val enr = WeatherEnrichment("KEY", 5200, 1, "history.openweathermap.org", 10)
+    val stamp =
+      enr.getWeatherContext(Option(validEvent.lat), Option(validEvent.lon), Option(validEvent.time))
     stamp.toEither must beLeft.like { case e => e must contain("AuthorizationError") }
   }
 
   def e5 = {
-    val enr   = WeatherEnrichment(validAppKey, 5200, 1, "history.openweathermap.org", 15)
-    val stamp = enr.getWeatherContext(Option(validEvent.lat), Option(validEvent.lon), Option(validEvent.time))
+    val enr = WeatherEnrichment(validAppKey, 5200, 1, "history.openweathermap.org", 15)
+    val stamp =
+      enr.getWeatherContext(Option(validEvent.lat), Option(validEvent.lon), Option(validEvent.time))
     stamp.toEither must beRight.like {
-      case weather: JValue => {
-        val temp = weather.findField { case JField("humidity", _) => true; case _ => false }
-        temp must beSome(("humidity", JDouble(92.0)))
-      }
+      case weather =>
+        val temp = weather.hcursor.get[Double]("humidity")
+        temp must beRight(92.0d)
     }
   }
 
   def e6 = {
-    val configJson = parse("""
-        |{
-        |    "enabled": true,
-        |    "vendor": "com.snowplowanalytics.snowplow.enrichments",
-        |    "name": "weather_enrichment_config",
-        |    "parameters": {
-        |        "apiKey": "{{KEY}}",
-        |        "cacheSize": 5100,
-        |        "geoPrecision": 1,
-        |        "apiHost": "history.openweathermap.org",
-        |        "timeout": 5
-        |    }
-        |}
-      """.stripMargin)
+    val configJson = json"""
+      {
+          "enabled": true,
+          "vendor": "com.snowplowanalytics.snowplow.enrichments",
+          "name": "weather_enrichment_config",
+          "parameters": {
+              "apiKey": "{{KEY}}",
+              "cacheSize": 5100,
+              "geoPrecision": 1,
+              "apiHost": "history.openweathermap.org",
+              "timeout": 5
+          }
+      }
+    """
     val config = WeatherEnrichmentConfig.parse(
       configJson,
-      SchemaKey("com.snowplowanalytics.snowplow.enrichments", "weather_enrichment_config", "jsonschema", "1-0-0"))
+      SchemaKey(
+        "com.snowplowanalytics.snowplow.enrichments",
+        "weather_enrichment_config",
+        "jsonschema",
+        "1-0-0"))
     config.toEither must beRight(
-      WeatherEnrichment(apiKey       = "{{KEY}}",
-                        geoPrecision = 1,
-                        cacheSize    = 5100,
-                        apiHost      = "history.openweathermap.org",
-                        timeout      = 5))
+      WeatherEnrichment(
+        apiKey = "{{KEY}}",
+        geoPrecision = 1,
+        cacheSize = 5100,
+        apiHost = "history.openweathermap.org",
+        timeout = 5))
   }
 
   def e7 = {
-    implicit val formats = DefaultFormats
-    val enr              = WeatherEnrichment(validAppKey, 2, 1, "history.openweathermap.org", 15)
-    val stamp            = enr.getWeatherContext(Option(validEvent.lat), Option(validEvent.lon), Option(validEvent.time))
+    val enr = WeatherEnrichment(validAppKey, 2, 1, "history.openweathermap.org", 15)
+    val stamp =
+      enr.getWeatherContext(Option(validEvent.lat), Option(validEvent.lon), Option(validEvent.time))
     stamp.toEither must beRight.like { // successful request
-      case weather: JValue => {
-        val e = (weather \ "data").extractOpt[TransformedWeather]
-        e.map(_.dt) must beSome.like { // succesfull transformation
-          case dt => dt must equalTo("2018-05-01T00:00:00.000Z") // closest stamp storing on server
+      case weather =>
+        weather.hcursor.get[TransformedWeather]("data") must beRight.like {
+          case w => w.dt must equalTo("2018-05-01T00:00:00.000Z")
         }
-      }
     }
   }
 
