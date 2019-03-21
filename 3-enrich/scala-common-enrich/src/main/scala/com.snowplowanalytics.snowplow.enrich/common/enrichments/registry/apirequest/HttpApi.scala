@@ -15,9 +15,8 @@ package enrichments.registry.apirequest
 
 import java.net.URLEncoder
 
+import cats.syntax.option._
 import io.circe.syntax._
-import scalaz._
-import Scalaz._
 
 import utils.HttpClient
 
@@ -48,7 +47,7 @@ case class HttpApi(method: String, uri: String, timeout: Int, authentication: Au
    * @param body optional request body
    * @return self-describing JSON ready to be attached to event contexts
    */
-  def perform(url: String, body: Option[String] = None): Validation[Throwable, String] = {
+  def perform(url: String, body: Option[String] = None): Either[Throwable, String] = {
     val req =
       HttpClient.buildRequest(url, authUser = authUser, authPassword = authPassword, body, method)
     HttpClient.getBody(req)
@@ -64,7 +63,8 @@ case class HttpApi(method: String, uri: String, timeout: Int, authentication: Au
   private[apirequest] def buildUrl(context: Map[String, String]): Option[String] = {
     val encodedContext = context.map { case (k, v) => (k, URLEncoder.encode(v, "UTF-8")) }
     val url = encodedContext.toList.foldLeft(uri)(replace)
-    everythingMatched(url).option(url)
+    if (everythingMatched(url)) url.some
+    else none
   }
 
   /**

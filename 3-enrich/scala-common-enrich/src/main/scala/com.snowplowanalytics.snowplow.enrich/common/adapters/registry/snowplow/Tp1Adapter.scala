@@ -15,9 +15,9 @@ package adapters
 package registry
 package snowplow
 
+import cats.data.NonEmptyList
+import cats.syntax.validated._
 import com.snowplowanalytics.iglu.client.Resolver
-import scalaz._
-import Scalaz._
 
 import loaders.CollectorPayload
 
@@ -34,16 +34,18 @@ object Tp1Adapter extends Adapter {
   def toRawEvents(payload: CollectorPayload)(implicit resolver: Resolver): ValidatedRawEvents = {
     val params = toMap(payload.querystring)
     if (params.isEmpty) {
-      "Querystring is empty: no raw event to process".failNel
+      "Querystring is empty: no raw event to process".invalidNel
     } else {
-      NonEmptyList(
-        RawEvent(
-          api = payload.api,
-          parameters = params,
-          contentType = payload.contentType,
-          source = payload.source,
-          context = payload.context
-        )).success
+      NonEmptyList
+        .one(
+          RawEvent(
+            api = payload.api,
+            parameters = params,
+            contentType = payload.contentType,
+            source = payload.source,
+            context = payload.context
+          ))
+        .valid
     }
   }
 }

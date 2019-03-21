@@ -45,9 +45,9 @@ lazy val root = project
       Dependencies.Libraries.jaywayJsonpath,
       Dependencies.Libraries.iabClient,
       // Scala
+      Dependencies.Libraries.cats,
       Dependencies.Libraries.circeOptics,
       Dependencies.Libraries.circeJackson,
-      Dependencies.Libraries.scalaz7,
       Dependencies.Libraries.snowplowRawEvent,
       Dependencies.Libraries.collectorPayload,
       Dependencies.Libraries.schemaSniffer,
@@ -61,7 +61,6 @@ lazy val root = project
       Dependencies.Libraries.gatlingJsonpath,
       // Scala (test only)
       Dependencies.Libraries.specs2,
-      Dependencies.Libraries.scalazSpecs2,
       Dependencies.Libraries.scalaCheck,
       Dependencies.Libraries.scaldingArgs,
       Dependencies.Libraries.mockito

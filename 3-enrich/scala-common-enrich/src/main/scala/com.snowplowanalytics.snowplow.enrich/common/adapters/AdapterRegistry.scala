@@ -13,9 +13,8 @@
 package com.snowplowanalytics.snowplow.enrich.common
 package adapters
 
+import cats.syntax.validated._
 import com.snowplowanalytics.iglu.client.Resolver
-import scalaz._
-import Scalaz._
 
 import loaders.CollectorPayload
 import registry._
@@ -90,7 +89,7 @@ object AdapterRegistry {
       case (Vendor.Vero, "v1") => VeroAdapter.toRawEvents(payload)
       case (Vendor.HubSpot, "v1") => HubSpotAdapter.toRawEvents(payload)
       case _ =>
-        s"Payload with vendor ${payload.api.vendor} and version ${payload.api.version} not supported by this version of Scala Common Enrich".failNel
+        s"Payload with vendor ${payload.api.vendor} and version ${payload.api.version} not supported by this version of Scala Common Enrich".invalidNel
     }
 
 }

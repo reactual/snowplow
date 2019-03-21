@@ -15,13 +15,15 @@ package adapters
 package registry
 
 import scala.util.Try
-import scala.util.control.NonFatal
 
+import cats.data.NonEmptyList
+import cats.syntax.apply._
+import cats.syntax.either._
+import cats.syntax.option._
+import cats.syntax.validated._
 import com.snowplowanalytics.iglu.client.Resolver
 import io.circe._
 import org.joda.time.DateTime
-import scalaz._
-import Scalaz._
 
 import loaders.{CollectorContext, CollectorPayload}
 import utils.ConversionUtils
@@ -72,69 +74,65 @@ object CloudfrontAccessLogAdapter {
      */
     def toRawEvents(payload: CollectorPayload)(implicit resolver: Resolver): ValidatedRawEvents =
       payload.body match {
-        case Some(p) => {
+        case Some(p) =>
           val fields = p.split("\t", -1)
           val schemaVersion = fields.size match {
-            case 12 => "1-0-0".successNel // Before 12 Sep 2012
-            case 15 => "1-0-1".successNel // 12 Sep 2012
-            case 18 => "1-0-2".successNel // 21 Oct 2013
-            case 19 => "1-0-3".successNel // 29 Apr 2014
-            case 23 => "1-0-4".successNel // 01 Jul 2015
-            case 24 => "1-0-5".successNel // 29 Sep 2016
-            case 26 => "1-0-6".successNel
+            case 12 => "1-0-0".validNel // Before 12 Sep 2012
+            case 15 => "1-0-1".validNel // 12 Sep 2012
+            case 18 => "1-0-2".validNel // 21 Oct 2013
+            case 19 => "1-0-3".validNel // 29 Apr 2014
+            case 23 => "1-0-4".validNel // 01 Jul 2015
+            case 24 => "1-0-5".validNel // 29 Sep 2016
+            case 26 => "1-0-6".validNel
             case n =>
-              s"Access log TSV line contained $n fields, expected 12, 15, 18, 19, 23, 24 or 26".failNel
+              s"Access log TSV line contained $n fields, expected 12, 15, 18, 19, 23, 24 or 26".invalidNel
           }
-          schemaVersion.flatMap { v =>
-            // Combine the first two fields into a timestamp
-            val schemaCompatibleFields =
-              "%sT%sZ".format(fields(0), fields(1)) :: fields.toList.tail.tail
 
-            val (errors, ueJson) =
-              buildJson(Nil, FieldNames zip schemaCompatibleFields, JsonObject.empty)
+          // Combine the first two fields into a timestamp
+          val schemaCompatibleFields =
+            "%sT%sZ".format(fields(0), fields(1)) :: fields.toList.tail.tail
+          val ip = schemaCompatibleFields(3) match {
+            case "" => None
+            case nonempty => nonempty.some
+          }
+          val qsParams: Map[String, String] = schemaCompatibleFields(8) match {
+            case "" => Map()
+            case url => Map("url" -> url)
+          }
+          val userAgent = schemaCompatibleFields(9) match {
+            case "" => None
+            case nonempty => ConversionUtils.singleEncodePcts(nonempty).some
+          }
 
-            val failures = errors match {
-              case Nil => None.successNel
-              case h :: t => (NonEmptyList(h) :::> t).fail // list to nonemptylist
-            }
+          val (errors, ueJson) =
+            buildJson(Nil, FieldNames zip schemaCompatibleFields, JsonObject.empty)
 
-            val validatedTstamp = toTimestamp(fields(0), fields(1)).map(Some(_)).toValidationNel
+          val failures = errors match {
+            case Nil => "".valid
+            case h :: t => NonEmptyList.of(h, t: _*).invalid // list to nonemptylist
+          }
 
-            (validatedTstamp |@| failures) { (tstamp, e) =>
-              val ip = schemaCompatibleFields(3) match {
-                case "" => None
-                case nonempty => nonempty.some
-              }
+          val validatedTstamp = toTimestamp(fields(0), fields(1)).map(Some(_)).toValidatedNel
 
-              val qsParams: Map[String, String] = schemaCompatibleFields(8) match {
-                case "" => Map()
-                case url => Map("url" -> url)
-              }
-
-              val userAgent = schemaCompatibleFields(9) match {
-                case "" => None
-                case nonempty => ConversionUtils.singleEncodePcts(nonempty).some
-              }
-
-              val parameters = toUnstructEventParams(
-                TrackerVersion,
-                qsParams,
-                s"iglu:com.amazon.aws.cloudfront/wd_access_log/jsonschema/$v",
-                ueJson,
-                "srv"
+          (schemaVersion, validatedTstamp, failures).mapN { (schemaVer, tstamp, _) =>
+            val parameters = toUnstructEventParams(
+              TrackerVersion,
+              qsParams,
+              s"iglu:com.amazon.aws.cloudfront/wd_access_log/jsonschema/$schemaVer",
+              ueJson,
+              "srv"
+            )
+            NonEmptyList.one(
+              RawEvent(
+                api = payload.api,
+                parameters = parameters,
+                contentType = payload.contentType,
+                source = payload.source,
+                context = CollectorContext(tstamp, ip, userAgent, None, Nil, None)
               )
-              NonEmptyList(
-                RawEvent(
-                  api = payload.api,
-                  parameters = parameters,
-                  contentType = payload.contentType,
-                  source = payload.source,
-                  context = CollectorContext(tstamp, ip, userAgent, None, Nil, None)
-                ))
-            }
+            )
           }
-        }
-        case None => "Cloudfront TSV has no body - this should be impossible".failNel
+        case None => "Cloudfront TSV has no body - this should be impossible".invalidNel
       }
 
     /**
@@ -143,17 +141,13 @@ object CloudfrontAccessLogAdapter {
      * @param time The CloudFront log-format time
      * @return the timestamp as a Joda DateTime or an error String, all wrapped in a Validation
      */
-    def toTimestamp(date: String, time: String): Validation[String, DateTime] =
-      try {
-        DateTime
-          .parse("%sT%s+00:00".format(date, time))
-          .success // Construct a UTC ISO date from CloudFront date and time
-      } catch {
-        case NonFatal(e) =>
+    def toTimestamp(date: String, time: String): Either[String, DateTime] =
+      Either
+        .catchNonFatal(DateTime.parse("%sT%s+00:00".format(date, time)))
+        .leftMap { e =>
           "Unexpected exception converting Cloudfront web distribution access log date [%s] and time [%s] to timestamp: [%s]"
             .format(date, time, e.getMessage)
-            .fail
-      }
+        }
 
     // Attempt to build the json, accumulating errors from unparseable fields
     private def buildJson(

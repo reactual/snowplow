@@ -24,12 +24,14 @@ import scala.collection.JavaConversions._
 import scala.util.Try
 import scala.util.control.NonFatal
 
+import cats.data.Validated
+import cats.syntax.either._
+import cats.syntax.option._
+import cats.syntax.validated._
 import com.netaporter.uri.Uri
 import org.apache.commons.codec.binary.Base64
 import org.apache.commons.lang3.exception.ExceptionUtils
 import org.apache.http.client.utils.URLEncodedUtils
-import scalaz._
-import Scalaz._
 
 /** General-purpose utils to help the ETL process along. */
 object ConversionUtils {
@@ -114,17 +116,17 @@ object ConversionUtils {
   // 2. Functionality:
   // 1. If passed in null or "", return Success(None)
   // 2. If passed in a non-empty string but result == "", then return a Failure, because we have failed to decode something meaningful
-  def decodeBase64Url(field: String, str: String): Validation[String, String] =
-    try {
-      val decodedBytes = UrlSafeBase64.decode(str)
-      val result = new String(decodedBytes, UTF_8) // Must specify charset (EMR uses US_ASCII)
-      result.success
-    } catch {
-      case NonFatal(e) =>
+  def decodeBase64Url(field: String, str: String): Either[String, String] =
+    Either
+      .catchNonFatal {
+        val decodedBytes = UrlSafeBase64.decode(str)
+        val result = new String(decodedBytes, UTF_8) // Must specify charset (EMR uses US_ASCII)
+        result
+      }
+      .leftMap { e =>
         "Field [%s]: exception Base64-decoding [%s] (URL-safe encoding): [%s]"
           .format(field, str, e.getMessage)
-          .fail
-    }
+      }
 
   /**
    * Encodes a URL-safe Base64 string.
@@ -145,12 +147,12 @@ object ConversionUtils {
    * @return a Scalaz ValidatedString containing either the original String on Success, or an error
    * String on Failure.
    */
-  val validateUuid: (String, String) => ValidatedString = (field, str) => {
+  val validateUuid: (String, String) => Validated[String, String] = (field, str) => {
     def check(s: String)(u: UUID): Boolean = (u != null && s.toLowerCase == u.toString)
     val uuid = Try(UUID.fromString(str)).toOption.filter(check(str))
     uuid match {
-      case Some(_) => str.toLowerCase.success
-      case None => s"Field [$field]: [$str] is not a valid UUID".fail
+      case Some(_) => str.toLowerCase.valid
+      case None => s"Field [$field]: [$str] is not a valid UUID".invalid
     }
   }
 
@@ -160,13 +162,13 @@ object ConversionUtils {
    * @return a Scalaz ValidatedString containing either the original String on Success, or an error
    * String on Failure.
    */
-  val validateInteger: (String, String) => ValidatedString = (field, str) => {
+  val validateInteger: (String, String) => Validated[String, String] = (field, str) => {
     try {
       str.toInt
-      str.success
+      str.valid
     } catch {
       case _: java.lang.NumberFormatException =>
-        s"Field [$field]: [$str] is not a valid integer".fail
+        s"Field [$field]: [$str] is not a valid integer".invalid
     }
   }
 
@@ -184,19 +186,19 @@ object ConversionUtils {
    * @param str The String to decode
    * @return a Scalaz Validation, wrapping either an error String or the decoded String
    */
-  val decodeString: (Charset, String, String) => ValidatedString = (enc, field, str) =>
+  val decodeString: (Charset, String, String) => Validated[String, String] = (enc, field, str) =>
     try {
       // TODO: switch to style of fixTabsNewlines above
       // TODO: potentially switch to using fixTabsNewlines too to avoid duplication
       val s = Option(str).getOrElse("")
       val d = URLDecoder.decode(s, enc.toString)
       val r = d.replaceAll("(\\r|\\n)", "").replaceAll("\\t", "    ")
-      r.success
+      r.valid
     } catch {
       case NonFatal(e) =>
         "Field [%s]: Exception URL-decoding [%s] (encoding [%s]): [%s]"
           .format(field, str, enc, e.getMessage)
-          .fail
+          .invalid
   }
 
   /**
@@ -229,8 +231,8 @@ object ConversionUtils {
    * @param str The String to decode
    * @return a Scalaz Validation, wrapping either an error String or the decoded String
    */
-  def doubleDecode(field: String, str: String): ValidatedString =
-    ConversionUtils.decodeString(UTF_8, field, singleEncodePcts(str))
+  def doubleDecode(field: String, str: String): Validated[String, String] =
+    decodeString(UTF_8, field, singleEncodePcts(str))
 
   /**
    * Encodes a string in the specified encoding
@@ -250,35 +252,32 @@ object ConversionUtils {
    * @param useNetaporter Whether to use the com.netaporter.uri library
    * @return an Option-boxed URI object, or an error message, all wrapped in a Validation
    */
-  def stringToUri(uri: String, useNetaporter: Boolean = false): Validation[String, Option[URI]] =
+  def stringToUri(uri: String, useNetaporter: Boolean = false): Either[String, Option[URI]] =
     try {
       val r = uri.replaceAll(" ", "%20") // Because so many raw URIs are bad, #346
-      Some(URI.create(r)).success
+      Some(URI.create(r)).asRight
     } catch {
-      case npe: NullPointerException => None.success
+      case npe: NullPointerException => None.asRight
       case iae: IllegalArgumentException =>
         useNetaporter match {
-          case false => {
-            val netaporterUri = try {
-              Uri.parse(uri).success
-            } catch {
-              case NonFatal(e) =>
+          case false =>
+            val netaporterUri = Either
+              .catchNonFatal(Uri.parse(uri))
+              .leftMap { e =>
                 "Provided URI string [%s] could not be parsed by Netaporter: [%s]"
-                  .format(uri, ExceptionUtils.getRootCause(iae).getMessage)
-                  .fail
-            }
+                  .format(uri, e.getMessage)
+              }
             for {
               parsedUri <- netaporterUri
               finalUri <- stringToUri(parsedUri.toString, true)
             } yield finalUri
-          }
           case true =>
             "Provided URI string [%s] violates RFC 2396: [%s]"
               .format(uri, ExceptionUtils.getRootCause(iae).getMessage)
-              .fail
+              .asLeft
         }
       case NonFatal(e) =>
-        "Unexpected error creating URI from string [%s]: [%s]".format(uri, e.getMessage).fail
+        "Unexpected error creating URI from string [%s]: [%s]".format(uri, e.getMessage).asLeft
     }
 
   /**
@@ -286,13 +285,14 @@ object ConversionUtils {
    * @param uri URI containing the querystring
    * @param encoding Encoding of the URI
    */
-  def extractQuerystring(uri: URI, encoding: Charset): Validation[String, Map[String, String]] =
+  def extractQuerystring(uri: URI, encoding: Charset): Validated[String, Map[String, String]] =
     Try(URLEncodedUtils.parse(uri, encoding).map(p => (p.getName -> p.getValue))).recoverWith {
       case NonFatal(_) =>
         Try(Uri.parse(uri.toString).query.params).map(l => l.map(t => (t._1, t._2.getOrElse(""))))
     } match {
-      case util.Success(s) => s.toMap.success
-      case util.Failure(e) => s"Could not parse uri [$uri]. Uri parsing threw exception: [$e].".fail
+      case util.Success(s) => s.toMap.valid
+      case util.Failure(e) =>
+        s"Could not parse uri [$uri]. Uri parsing threw exception: [$e].".invalid
     }
 
   /**
@@ -301,16 +301,16 @@ object ConversionUtils {
    * @param field The name of the field we are trying to process. To use in our error message
    * @return a Scalaz Validation, being either a Failure String or a Success JInt
    */
-  val stringToJInteger: (String, String) => Validation[String, JInteger] = (field, str) =>
+  val stringToJInteger: (String, String) => Either[String, JInteger] = (field, str) =>
     if (Option(str).isEmpty) {
-      null.asInstanceOf[JInteger].success
+      null.asInstanceOf[JInteger].asRight
     } else {
       try {
         val jint: JInteger = str.toInt
-        jint.success
+        jint.asRight
       } catch {
         case nfe: NumberFormatException =>
-          "Field [%s]: cannot convert [%s] to Int".format(field, str).fail
+          "Field [%s]: cannot convert [%s] to Int".format(field, str).asLeft
       }
   }
 
@@ -323,18 +323,18 @@ object ConversionUtils {
    * @param field The name of the field we are validating. To use in our error message
    * @return a Scalaz Validation, being either a Failure String or a Success String
    */
-  val stringToDoublelike: (String, String) => ValidatedString = (field, str) =>
+  val stringToDoublelike: (String, String) => Validated[String, String] = (field, str) =>
     try {
       if (Option(str).isEmpty || str == "null") {
         // "null" String check is LEGACY to handle a bug in the JavaScript tracker
-        null.asInstanceOf[String].success
+        null.asInstanceOf[String].valid
       } else {
         val jbigdec = new JBigDecimal(str)
-        jbigdec.toPlainString.success // Strip scientific notation
+        jbigdec.toPlainString.valid // Strip scientific notation
       }
     } catch {
       case nfe: NumberFormatException =>
-        "Field [%s]: cannot convert [%s] to Double-like String".format(field, str).fail
+        "Field [%s]: cannot convert [%s] to Double-like String".format(field, str).invalid
   }
 
   /**
@@ -343,18 +343,18 @@ object ConversionUtils {
    * @param field The name of the field we are validating. To use in our error message
    * @return a Scalaz Validation, being either a Failure String or a Success Double
    */
-  def stringToMaybeDouble(field: String, str: String): Validation[String, Option[Double]] =
+  def stringToMaybeDouble(field: String, str: String): Validated[String, Option[Double]] =
     try {
       if (Option(str).isEmpty || str == "null") {
         // "null" String check is LEGACY to handle a bug in the JavaScript tracker
-        None.success
+        None.valid
       } else {
         val jbigdec = new JBigDecimal(str)
-        jbigdec.doubleValue().some.success
+        jbigdec.doubleValue().some.valid
       }
     } catch {
       case nfe: NumberFormatException =>
-        "Field [%s]: cannot convert [%s] to Double-like String".format(field, str).fail
+        "Field [%s]: cannot convert [%s] to Double-like String".format(field, str).invalid
     }
 
   /**
@@ -362,25 +362,22 @@ object ConversionUtils {
    * multipleOf 0.01.
    * Takes a field name and a string value and return a validated double.
    */
-  val stringToTwoDecimals: (String, String) => Validation[String, Double] = (field, str) =>
+  val stringToTwoDecimals: (String, String) => Either[String, Double] = (field, str) =>
     try {
-      BigDecimal(str).setScale(2, BigDecimal.RoundingMode.HALF_EVEN).toDouble.success
+      BigDecimal(str).setScale(2, BigDecimal.RoundingMode.HALF_EVEN).toDouble.asRight
     } catch {
       case nfe: NumberFormatException =>
-        "Field [%s]: cannot convert [%s] to Double".format(field, str).fail
+        "Field [%s]: cannot convert [%s] to Double".format(field, str).asLeft
   }
 
   /**
    * Converts a String to a Double.
    * Takes a field name and a string value and return a validated float.
    */
-  val stringToDouble: (String, String) => Validation[String, Double] = (field, str) =>
-    try {
-      BigDecimal(str).toDouble.success
-    } catch {
-      case nfe: NumberFormatException =>
-        "Field [%s]: cannot convert [%s] to Double".format(field, str).fail
-  }
+  val stringToDouble: (String, String) => Either[String, Double] = (field, str) =>
+    Either
+      .catchNonFatal(BigDecimal(str).toDouble)
+      .leftMap(_ => s"Field [$field]: cannot convert [$str] to Double")
 
   /**
    * Extract a Java Byte representing 1 or 0 only from a String, or error.
@@ -388,11 +385,11 @@ object ConversionUtils {
    * @param field The name of the field we are trying to process. To use in our error message
    * @return a Scalaz Validation, being either a Failure String or a Success Byte
    */
-  val stringToBooleanlikeJByte: (String, String) => Validation[String, JByte] = (field, str) =>
+  val stringToBooleanlikeJByte: (String, String) => Validated[String, JByte] = (field, str) =>
     str match {
-      case "1" => (1.toByte: JByte).success
-      case "0" => (0.toByte: JByte).success
-      case _ => "Field [%s]: cannot convert [%s] to Boolean-like JByte".format(field, str).fail
+      case "1" => (1.toByte: JByte).valid
+      case "0" => (0.toByte: JByte).valid
+      case _ => "Field [%s]: cannot convert [%s] to Boolean-like JByte".format(field, str).invalid
   }
 
   /**
@@ -401,13 +398,13 @@ object ConversionUtils {
    * @return True for "1", false for "0", or an error message for any other value, all boxed in a
    * Scalaz Validation
    */
-  val stringToBoolean: (String, String) => Validation[String, Boolean] = (field, str) =>
+  val stringToBoolean: (String, String) => Either[String, Boolean] = (field, str) =>
     if (str == "1") {
-      true.success
+      true.asRight
     } else if (str == "0") {
-      false.success
+      false.asRight
     } else {
-      "Field [%s]: Cannot convert [%s] to boolean, only 1 or 0.".format(field, str).fail
+      s"Field [$field]: Cannot convert [$str] to boolean, only 1 or 0.".asLeft
   }
 
   /**
@@ -437,11 +434,11 @@ object ConversionUtils {
    * @return the Boolean value of b, or an error message if b is not 0 or 1 - all boxed in a
    * Scalaz Validation
    */
-  def byteToBoolean(b: Byte): Validation[String, Boolean] =
+  def byteToBoolean(b: Byte): Validated[String, Boolean] =
     if (b == 0)
-      false.success
+      false.valid
     else if (b == 1)
-      true.success
+      true.valid
     else
-      "Cannot convert byte [%s] to boolean, only 1 or 0.".format(b).fail
+      "Cannot convert byte [%s] to boolean, only 1 or 0.".format(b).invalid
 }
